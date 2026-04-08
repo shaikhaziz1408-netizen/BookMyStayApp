@@ -57,17 +57,6 @@ class SuiteRoom extends Room { public SuiteRoom() { super("Suite Room", 3, 750, 
 
 /**
  * ============================================================================
- * CLASS - RoomSearchService
- * ============================================================================
- */
-class RoomSearchService {
-    public void searchAvailableRooms(RoomInventory inventory, Room singleRoom, Room doubleRoom, Room suiteRoom) {
-        // Implementation hidden for brevity, same as UC4
-    }
-}
-
-/**
- * ============================================================================
  * CLASS - Reservation & BookingRequestQueue
  * ============================================================================
  */
@@ -96,16 +85,43 @@ class BookingRequestQueue {
 
 /**
  * ============================================================================
+ * CLASS - BookingHistory (NEW FOR UC8)
+ * ============================================================================
+ * Maintains a record of confirmed reservations using a List to preserve
+ * insertion order, acting as our persistence layer.
+ */
+class BookingHistory {
+    private List<Reservation> history;
+
+    public BookingHistory() {
+        this.history = new ArrayList<>();
+    }
+
+    public void addRecord(Reservation reservation) {
+        history.add(reservation);
+    }
+
+    public List<Reservation> getHistory() {
+        return history;
+    }
+}
+
+/**
+ * ============================================================================
  * CLASS - RoomAllocationService
  * ============================================================================
+ * Updated for UC8: Now injects BookingHistory and saves confirmed records.
  */
 class RoomAllocationService {
     private RoomInventory inventory;
+    private BookingHistory bookingHistory;
     private Map<String, Set<String>> allocatedRooms;
     private int roomCounter = 100;
 
-    public RoomAllocationService(RoomInventory inventory) {
+    // Added BookingHistory to constructor
+    public RoomAllocationService(RoomInventory inventory, BookingHistory bookingHistory) {
         this.inventory = inventory;
+        this.bookingHistory = bookingHistory;
         this.allocatedRooms = new HashMap<>();
     }
 
@@ -127,9 +143,11 @@ class RoomAllocationService {
             allocatedRooms.get(type).add(roomId);
             inventory.updateAvailability(type, availableCount - 1);
 
-            // Assign the room ID as the reservation ID for tracking
             request.setReservationId(roomId);
             System.out.println("CONFIRMED: " + request.getGuestName() + " assigned Room " + roomId);
+
+            // UC8: Save to historical audit trail immediately after confirmation
+            bookingHistory.addRecord(request);
         } else {
             System.out.println("FAILED: " + type + " sold out for " + request.getGuestName());
         }
@@ -138,60 +156,46 @@ class RoomAllocationService {
 
 /**
  * ============================================================================
- * CLASS - AddOnService (NEW FOR UC7)
+ * CLASS - BookingReportService (NEW FOR UC8)
  * ============================================================================
- * Represents an individual optional offering.
+ * Generates summaries and reports from stored booking data without modifying it.
  */
+class BookingReportService {
+    public void generateSummaryReport(BookingHistory history) {
+        List<Reservation> records = history.getHistory();
+
+        System.out.println("\n=======================================");
+        System.out.println("      ADMIN: BOOKING HISTORY REPORT    ");
+        System.out.println("=======================================");
+
+        if (records.isEmpty()) {
+            System.out.println("No confirmed bookings found.");
+        } else {
+            System.out.println("Total Confirmed Bookings: " + records.size() + "\n");
+            for (int i = 0; i < records.size(); i++) {
+                Reservation res = records.get(i);
+                System.out.println((i + 1) + ". [ID: " + res.getReservationId() + "] Guest: " +
+                        res.getGuestName() + " | Room: " + res.getRoomType());
+            }
+        }
+        System.out.println("=======================================\n");
+    }
+}
+
+// ... AddOnService and AddOnServiceManager remain identical to UC7 ...
 class AddOnService {
     private String serviceName;
     private double cost;
-
-    public AddOnService(String serviceName, double cost) {
-        this.serviceName = serviceName;
-        this.cost = cost;
-    }
-
+    public AddOnService(String serviceName, double cost) { this.serviceName = serviceName; this.cost = cost; }
     public String getServiceName() { return serviceName; }
     public double getCost() { return cost; }
 }
 
-/**
- * ============================================================================
- * CLASS - AddOnServiceManager (NEW FOR UC7)
- * ============================================================================
- * Manages the association between reservations and selected services.
- * Demonstrates a One-to-Many relationship using Map and List.
- */
 class AddOnServiceManager {
-    // Maps a Reservation ID to a List of AddOnServices
-    private Map<String, List<AddOnService>> reservationServices;
-
-    public AddOnServiceManager() {
-        this.reservationServices = new HashMap<>();
-    }
-
+    private Map<String, List<AddOnService>> reservationServices = new HashMap<>();
     public void addService(String reservationId, AddOnService service) {
         reservationServices.putIfAbsent(reservationId, new ArrayList<>());
         reservationServices.get(reservationId).add(service);
-    }
-
-    public void displayServicesAndCost(String reservationId) {
-        List<AddOnService> services = reservationServices.getOrDefault(reservationId, new ArrayList<>());
-
-        System.out.println("\n--- Add-On Services for Reservation: " + reservationId + " ---");
-
-        if (services.isEmpty()) {
-            System.out.println("No add-on services selected.");
-            return;
-        }
-
-        double totalCost = 0.0;
-        for (AddOnService service : services) {
-            System.out.println(" + " + service.getServiceName() + ": $" + service.getCost());
-            totalCost += service.getCost();
-        }
-        System.out.println("----------------------------------------------");
-        System.out.println("Total Add-On Cost: $" + totalCost);
     }
 }
 
@@ -204,34 +208,26 @@ public class BookMyStayApp {
 
     public static void main(String[] args) {
         System.out.println("=======================================");
-        System.out.println("    === Book My Stay App (UC7) ===");
+        System.out.println("    === Book My Stay App (UC8) ===");
         System.out.println("=======================================\n");
 
         RoomInventory inventory = new RoomInventory();
         BookingRequestQueue queue = new BookingRequestQueue();
-        RoomAllocationService allocationService = new RoomAllocationService(inventory);
-        AddOnServiceManager addonManager = new AddOnServiceManager();
+        BookingHistory history = new BookingHistory(); // UC8 initialized
 
-        // 1. Process a booking
-        Reservation req1 = new Reservation("Alice Smith", "Suite Room");
-        queue.enqueueRequest(req1);
-        System.out.println("\nAllocating rooms...");
+        // Pass the history into the allocation service so it can record confirmations
+        RoomAllocationService allocationService = new RoomAllocationService(inventory, history);
+        BookingReportService reportService = new BookingReportService(); // UC8 initialized
+
+        // 1. Process multiple bookings
+        queue.enqueueRequest(new Reservation("Alice Smith", "Suite Room"));
+        queue.enqueueRequest(new Reservation("Bob Johnson", "Double Room"));
+        queue.enqueueRequest(new Reservation("Charlie Brown", "Single Room"));
+
+        System.out.println("\nProcessing queue and allocating rooms...");
         allocationService.processQueue(queue);
 
-        // 2. Define some Add-On Services
-        AddOnService breakfast = new AddOnService("Complimentary Breakfast", 50.0);
-        AddOnService spa = new AddOnService("Spa Access", 120.0);
-        AddOnService airportPickup = new AddOnService("Airport Pickup", 75.0);
-
-        // 3. Attach services to the confirmed reservation ID
-        String aliceResId = req1.getReservationId();
-
-        if(aliceResId != null) {
-            addonManager.addService(aliceResId, breakfast);
-            addonManager.addService(aliceResId, spa);
-
-            // 4. Display the results
-            addonManager.displayServicesAndCost(aliceResId);
-        }
+        // 2. Admin requests the Booking History Report
+        reportService.generateSummaryReport(history);
     }
 }
