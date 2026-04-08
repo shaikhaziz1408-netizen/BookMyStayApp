@@ -2,20 +2,13 @@ import java.util.*;
 
 /**
  * ============================================================================
- * CUSTOM EXCEPTION
+ * CLASS - RoomInventory (Thread-Safe)
  * ============================================================================
- */
-class InvalidBookingException extends Exception {
-    public InvalidBookingException(String message) { super(message); }
-}
-
-/**
- * ============================================================================
- * CLASS - RoomInventory
- * ============================================================================
+ * Updated for UC11: Uses synchronized methods to prevent race conditions
+ * during concurrent inventory updates.
  */
 class RoomInventory {
-    private Map<String, Integer> roomAvailability = new HashMap<>();
+    private final Map<String, Integer> roomAvailability = new HashMap<>();
 
     public RoomInventory() {
         roomAvailability.put("Single Room", 5);
@@ -23,8 +16,14 @@ class RoomInventory {
         roomAvailability.put("Suite Room", 2);
     }
 
-    public Map<String, Integer> getRoomAvailability() { return roomAvailability; }
-    public void updateAvailability(String roomType, int count) { roomAvailability.put(roomType, count); }
+    // Synchronized to ensure only one thread can check/update at a time
+    public synchronized Map<String, Integer> getRoomAvailability() {
+        return new HashMap<>(roomAvailability); // Return a copy for thread safety
+    }
+
+    public synchronized void updateAvailability(String roomType, int count) {
+        roomAvailability.put(roomType, count);
+    }
 }
 
 // --- Domain Models ---
@@ -32,7 +31,6 @@ class Reservation {
     private String guestName;
     private String roomType;
     private String reservationId;
-    private boolean isCancelled = false;
 
     public Reservation(String guestName, String roomType) {
         this.guestName = guestName;
@@ -43,89 +41,36 @@ class Reservation {
     public String getRoomType() { return roomType; }
     public String getReservationId() { return reservationId; }
     public void setReservationId(String reservationId) { this.reservationId = reservationId; }
-    public boolean isCancelled() { return isCancelled; }
-    public void setCancelled(boolean cancelled) { isCancelled = cancelled; }
 }
 
 /**
  * ============================================================================
- * CLASS - BookingHistory
+ * CLASS - BookingHistory (Thread-Safe)
  * ============================================================================
  */
 class BookingHistory {
-    private List<Reservation> history = new ArrayList<>();
-    public void addRecord(Reservation reservation) { history.add(reservation); }
-    public List<Reservation> getHistory() { return history; }
+    // Vector is a legacy thread-safe List, or use Collections.synchronizedList
+    private final List<Reservation> history = Collections.synchronizedList(new ArrayList<>());
 
-    // Helper to find a reservation for cancellation
-    public Reservation findById(String id) {
-        for (Reservation r : history) {
-            if (id.equals(r.getReservationId())) return r;
-        }
-        return null;
+    public void addRecord(Reservation reservation) {
+        history.add(reservation);
+    }
+
+    public List<Reservation> getHistory() {
+        return new ArrayList<>(history);
     }
 }
 
 /**
  * ============================================================================
- * CLASS - CancellationService (NEW FOR UC10)
+ * CLASS - RoomAllocationService (Thread-Safe)
  * ============================================================================
- * Handles state reversal using a Stack for LIFO rollback logic.
- * Ensures inventory consistency when a booking is undone.
- */
-class CancellationService {
-    private RoomInventory inventory;
-    private BookingHistory history;
-
-    // Stack tracks released Room IDs for potential audit or reuse
-    private Stack<String> releasedRoomStack;
-
-    public CancellationService(RoomInventory inventory, BookingHistory history) {
-        this.inventory = inventory;
-        this.history = history;
-        this.releasedRoomStack = new Stack<>();
-    }
-
-    /**
-     * Reverses a confirmed booking and restores inventory.
-     * * @param reservationId the ID to cancel
-     * @throws InvalidBookingException if ID is invalid or already cancelled
-     */
-    public void cancelBooking(String reservationId) throws InvalidBookingException {
-        Reservation res = history.findById(reservationId);
-
-        // 1. Validation
-        if (res == null) {
-            throw new InvalidBookingException("Cancellation Failed: Reservation ID '" + reservationId + "' not found.");
-        }
-        if (res.isCancelled()) {
-            throw new InvalidBookingException("Cancellation Failed: Reservation '" + reservationId + "' is already cancelled.");
-        }
-
-        // 2. Perform Rollback Logic
-        String type = res.getRoomType();
-        int currentCount = inventory.getRoomAvailability().get(type);
-
-        // 3. Update State
-        inventory.updateAvailability(type, currentCount + 1);
-        res.setCancelled(true);
-
-        // 4. LIFO Rollback Tracking
-        releasedRoomStack.push(res.getReservationId());
-
-        System.out.println("CANCELLED: " + res.getGuestName() + "'s booking [" + reservationId + "] has been reversed.");
-        System.out.println("LOG: Room " + reservationId + " pushed to LIFO rollback stack. New Inventory: " + (currentCount + 1));
-    }
-}
-
-/**
- * ============================================================================
- * CLASS - RoomAllocationService
- * ============================================================================
+ * Use Case 11: Concurrent Booking Simulation
+ * Handles allocation logic inside synchronized blocks to prevent double-booking.
  */
 class RoomAllocationService {
-    private RoomInventory inventory;
-    private BookingHistory bookingHistory;
+    private final RoomInventory inventory;
+    private final BookingHistory bookingHistory;
     private int roomCounter = 100;
 
     public RoomAllocationService(RoomInventory inventory, BookingHistory bookingHistory) {
@@ -133,22 +78,31 @@ class RoomAllocationService {
         this.bookingHistory = bookingHistory;
     }
 
-    public void allocateRoom(Reservation request) throws InvalidBookingException {
+    /**
+     * The critical section is synchronized on the service instance to ensure
+     * that room IDs and inventory are updated atomically.
+     */
+    public synchronized void allocateRoom(Reservation request) {
         String type = request.getRoomType();
         int availableCount = inventory.getRoomAvailability().getOrDefault(type, 0);
 
-        if (availableCount <= 0) {
-            throw new InvalidBookingException("Inventory Error: '" + type + "' sold out.");
+        if (availableCount > 0) {
+            // Simulated delay to expose potential race conditions if not synchronized
+            try { Thread.sleep(10); } catch (InterruptedException e) {}
+
+            roomCounter++;
+            String roomId = type.substring(0, 3).toUpperCase() + "-" + roomCounter;
+
+            inventory.updateAvailability(type, availableCount - 1);
+            request.setReservationId(roomId);
+            bookingHistory.addRecord(request);
+
+            System.out.println("[THREAD: " + Thread.currentThread().getName() + "] CONFIRMED: "
+                    + request.getGuestName() + " -> " + roomId);
+        } else {
+            System.out.println("[THREAD: " + Thread.currentThread().getName() + "] FAILED: "
+                    + type + " sold out for " + request.getGuestName());
         }
-
-        roomCounter++;
-        String roomId = type.substring(0, 3).toUpperCase() + "-" + roomCounter;
-
-        inventory.updateAvailability(type, availableCount - 1);
-        request.setReservationId(roomId);
-        bookingHistory.addRecord(request);
-
-        System.out.println("CONFIRMED: " + request.getGuestName() + " assigned Room " + roomId);
     }
 }
 
@@ -156,44 +110,44 @@ class RoomAllocationService {
  * ============================================================================
  * MAIN CLASS - BookMyStayApp
  * ============================================================================
+ * Simulates multiple threads (guests) attempting to book at the same time.
  */
 public class BookMyStayApp {
 
     public static void main(String[] args) {
         System.out.println("=======================================");
-        System.out.println("    === Book My Stay App (UC10) ===");
+        System.out.println("    === Book My Stay App (UC11) ===");
+        System.out.println("    Concurrent Booking Simulation");
         System.out.println("=======================================\n");
 
         RoomInventory inventory = new RoomInventory();
         BookingHistory history = new BookingHistory();
         RoomAllocationService allocationService = new RoomAllocationService(inventory, history);
-        CancellationService cancellationService = new CancellationService(inventory, history);
 
-        try {
-            // 1. Create and Process Bookings
-            Reservation res1 = new Reservation("Alice Smith", "Suite Room");
-            Reservation res2 = new Reservation("Bob Johnson", "Single Room");
+        // Define a list of guest requests
+        List<Reservation> requests = Arrays.asList(
+                new Reservation("Guest_1", "Suite Room"),
+                new Reservation("Guest_2", "Suite Room"),
+                new Reservation("Guest_3", "Suite Room"), // Only 2 suites exist!
+                new Reservation("Guest_4", "Single Room"),
+                new Reservation("Guest_5", "Single Room")
+        );
 
-            allocationService.allocateRoom(res1);
-            allocationService.allocateRoom(res2);
-
-            System.out.println("\n--- Current Inventory Status ---");
-            System.out.println("Suite Rooms: " + inventory.getRoomAvailability().get("Suite Room"));
-
-            // 2. Perform Cancellation (Rollback)
-            System.out.println("\n--- Initiating Cancellation ---");
-            cancellationService.cancelBooking(res1.getReservationId());
-
-            // 3. Verify Inventory Restoration
-            System.out.println("\n--- Final Inventory Status ---");
-            System.out.println("Suite Rooms (After Rollback): " + inventory.getRoomAvailability().get("Suite Room"));
-
-            // 4. Test Invalid Cancellation
-            System.out.println("\n--- Testing Invalid Cancellation ---");
-            cancellationService.cancelBooking("NON-EXISTENT-ID");
-
-        } catch (InvalidBookingException e) {
-            System.out.println("SYSTEM_NOTICE: " + e.getMessage());
+        // Create and start a thread for each request
+        List<Thread> threads = new ArrayList<>();
+        for (Reservation res : requests) {
+            Thread t = new Thread(() -> allocationService.allocateRoom(res), res.getGuestName());
+            threads.add(t);
+            t.start();
         }
+
+        // Wait for all threads to finish
+        for (Thread t : threads) {
+            try { t.join(); } catch (InterruptedException e) {}
+        }
+
+        System.out.println("\n--- Final System State Verification ---");
+        System.out.println("Total Bookings in History: " + history.getHistory().size());
+        System.out.println("Remaining Suite Rooms: " + inventory.getRoomAvailability().get("Suite Room"));
     }
 }
